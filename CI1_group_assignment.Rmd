@@ -1,0 +1,166 @@
+---
+title: "CIF"
+author: "Yufang"
+date: "2024-02-23"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+Research question: Any causal relationship between education level and 
+long-term (16 year) death.
+
+# 1. The gobal DAG
+```{r}
+library(dagitty)
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+
+g.postulated <- dagitty('dag {
+  SEX  [pos="2.500,3.000"]
+  AGE  [pos="-4.000,-1.000"]
+  SYSBP  [pos="2.500,-1.000"]
+  DEATH  [outcome,pos="-1.000,-2.000"]
+  BPMEDS [pos="-1.000,0.000"]
+  CURSMOKE [pos="-4.000,-3.000"]
+  BMI [pos="-4.000,3.000"]
+  HEARTRTE  [pos="-4.000,1.000"]
+  DIABP  [pos="1.000,-3.000"]
+  EDUC [exposure,pos="-1.000,3.000"]
+  SEX   -> {DEATH SYSBP DIABP BPMEDS CURSMOKE EDUC HEARTRATE}
+  AGE  -> { DEATH SYSBP DIABP BMI HEARTRATE EDUC}
+  SYSBP  -> { BPMEDS}
+  BMI -> DEATH
+  EDUC -> BPMEDS
+  HEARTRTE -> {SYSBP DIABP}
+  }
+')
+
+## Plotting DAG
+plot(g.postulated)
+```
+
+The minimal adjustment set is:
+```{r, echo=TRUE}
+adjustmentSets(g.postulated, type = "minimal", effect = "total")
+```
+
+# 3. Import the data and check the assumptions
+```{r, echo=TRUE}
+df = read.csv("framingham_assignment.csv")
+df$SEX = factor(df$SEX)
+df$SEX = factor(df$SEX, levels = c(1, 2), labels = c("Male", "Female"))
+df$EDUC = factor(df$EDUC, levels = c(0, 1), labels = c("HighSchoolorBelow", "CollegeorMore"))
+df$DEATH = factor(df$DEATH, levels = c(0, 1), labels = c("Alive", "Death"))
+
+table(df$EDUC, df$DEATH)
+mean(df$AGE[df$DEATH])
+prop.table(table(df$EDUC, df$SEX), margin = 1)
+
+library(vioplot)
+vioplot::vioplot(df$AGE ~ df$EDUC, col = 2:3, xlab = "", ylab = "AGE")
+```
+
+
+
+
+# 4. Check the missing data issues
+```{r, echo=TRUE}
+ExpDf = data.frame(EDUC = df$EDUC, DEATH = df$DEATH, SEX = df$SEX, AGE = df$AGE)
+colSums(apply(ExpDf, 2, is.na))
+```
+As shown in the table, Only data in variable 'EDUC' is missing. In our study,
+variable 'EDUC' is the predictor instead of the response variable. Therefore, we
+argue that the data set in this study is missing at random (MAR).
+
+# 5. Statistical method
+To obtain the causal conclusion from observational data, i.e., the case
+of the current study, we picked up the G-computation (outcome regression + 
+standardization) and the propensity score method (inverse probability weighing,
+matching, stratification) to analysis data, as required by the assignment.
+
+## outcome regression
+
+In this analysis, we assume 1) conditional exchangeability, given age and gender as 
+start, and 2) the linear model fits.
+```{r, echo=TRUE}
+model = glm(DEATH ~ SEX * EDUC*AGE, family = binomial(link = "logit"), data = ExpDf)
+summary(model)
+
+# Obtain the EY1hat and EY2hat
+newdata = ExpDf
+newdata$EDUC = "CollegeorMore"
+Y1hat = predict(model, newdata = newdata, type = "response")
+
+
+newdata$EDUC = "HighSchoolorBelow"
+Y0hat = predict(model, newdata = newdata, type = "response")
+mean(Y1hat) - mean(Y0hat)
+
+library(stdReg)
+fit.std = stdGlm(fit = model, data = ExpDf, X = "EDUC")
+summary(fit.std, contrast = "difference", reference = "HighSchoolorBelow")
+```
+Report the result at the probability scale already.
+
+### Assumption checking
+```{r, echo=TRUE}
+plot(model)
+```
+## the propensity score method (inverse probability weighing,
+matching, stratification)
+```{r, echo=TRUE}
+ExpDf2 = ExpDf[complete.cases(ExpDf), ]
+model2 = glm(EDUC ~ SEX + AGE, family = binomial(link = "logit"), data = ExpDf2)
+
+
+ExpDf2$ps1 = fitted.values(model2)
+range(ExpDf2$ps1)
+
+
+ExpDf2$ipw1 <- (ExpDf2$EDUC == "CollegeorMore")/ExpDf2$ps1 + (ExpDf2$EDUC == "HighSchoolorBelow")/(1 - ExpDf2$ps1)
+summary(ExpDf2$ipw1)
+
+# c: checking the balance
+vars1 = c("SEX", "AGE")
+covariates = ExpDf2[, vars1]
+
+library(cobalt)
+bal.tab(covariates, treat =ExpDf2$EDUC, weights = ExpDf2$ipw1, method = "weighting", un = TRUE)
+
+love.plot(
+  covariates,
+  treat = ExpDf2$EDUC,
+  weights = ExpDf2$ipw1,
+  method = "weighting",
+  binary = "std",
+  threshold = .1
+)
+
+#histogram
+par(mfrow=c(2,1))
+hist(ExpDf2$ps1[ExpDf2$EDUC == "CollegeorMore"], xlim=c(0,1),main="CollegeorMore", xlab="Propensity score")
+hist(ExpDf2$ps1[ExpDf2$EDUC == "HighSchoolorBelow"], xlim=c(0,1),main="HighSchoolorBelow", xlab="Propensity score")
+
+
+# f
+ExpDf2$DEATH.num = as.numeric(ExpDf2$DEATH) - 1
+
+# g
+EY1 = weighted.mean(ExpDf2$DEATH.num[ExpDf2$EDUC == "CollegeorMore"], ExpDf2$ipw1[ExpDf2$EDUC == "CollegeorMore"])
+EY0 = weighted.mean(ExpDf2$DEATH.num[ExpDf2$EDUC == "HighSchoolorBelow"], ExpDf2$ipw1[ExpDf2$EDUC == "HighSchoolorBelow"])
+EY1 - EY0
+
+# h
+# ipw2.p99 = quantile(ExpDf2$ipw1, 0.99)
+# ExpDf2$ipw1.trunc = ifelse(ExpDf2$ipw1> ipw2.p99, ipw2.p99, ExpDf2$ipw1)
+library(survey)
+
+d.w = svydesign(~ 1, weights = ExpDf2$ipw1, data = ExpDf2)
+fit.ipw = svyglm(DEATH.num ~ EDUC, design = d.w)
+summary(fit.ipw)
+
+confint(fit.ipw)
+```
