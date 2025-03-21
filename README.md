@@ -22,7 +22,7 @@ Methodologically, the investigation involves two main steps:
 `CI1_group_assignment.Rmd`
 
 ## Report
-`CasualInference.pdf`
+`Report.pdf`
 
 
 
